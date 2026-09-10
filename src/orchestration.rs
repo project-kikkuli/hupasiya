@@ -4,7 +4,7 @@ use crate::config::Config;
 use crate::context::ContextManager;
 use crate::error::{Error, Result};
 use crate::hn_client::HnClient;
-use crate::models::{ActivityType, Session, SnapshotTrigger};
+use crate::models::{ActivityType, Session, SessionStatus, SnapshotTrigger};
 use crate::session::SessionManager;
 use colored::Colorize;
 
@@ -92,7 +92,17 @@ impl Orchestrator {
     /// Cascade to a single child
     fn cascade_to_child(&self, parent: &Session, child_name: &str, dry_run: bool) -> Result<bool> {
         // Load child session
-        let mut child = self.session_mgr.load_session(child_name)?;
+        let child = self.session_mgr.load_session(child_name)?;
+
+        // Retain closed children in session history without treating their
+        // removed worktrees as active merge destinations or sources.
+        if matches!(
+            child.status,
+            SessionStatus::Archived | SessionStatus::Integrated | SessionStatus::Abandoned
+        ) {
+            println!("  {} {} (closed)", "↷".dimmed(), child_name);
+            return Ok(false);
+        }
 
         println!("  {} {}", "→".cyan(), child_name);
 
@@ -152,18 +162,20 @@ impl Orchestrator {
         }
 
         // Update child activity log
-        child.log_activity(
-            ActivityType::Cascaded,
-            format!("Cascaded changes from parent '{}'", parent.name),
-        );
-        self.session_mgr.save_session(&child)?;
+        self.session_mgr.mutate_session(&child.name, |current| {
+            current.log_activity(
+                ActivityType::Cascaded,
+                format!("Cascaded changes from parent '{}'", parent.name),
+            );
+            Ok(())
+        })?;
 
         Ok(true)
     }
 
     /// Gather: Collect all children back to parent
     pub fn gather(&self, parent_name: &str, dry_run: bool) -> Result<()> {
-        let mut parent = self.session_mgr.load_session(parent_name)?;
+        let parent = self.session_mgr.load_session(parent_name)?;
 
         if parent.children.is_empty() {
             println!("{}", "No child sessions to gather from.".yellow());
@@ -219,11 +231,13 @@ impl Orchestrator {
             println!("{} Dry run complete", "ℹ".blue());
         } else {
             // Update parent activity
-            parent.log_activity(
-                ActivityType::Gathered,
-                format!("Gathered {} children", gathered),
-            );
-            self.session_mgr.save_session(&parent)?;
+            self.session_mgr.mutate_session(&parent.name, |current| {
+                current.log_activity(
+                    ActivityType::Gathered,
+                    format!("Gathered {} children", gathered),
+                );
+                Ok(())
+            })?;
 
             println!(
                 "{} Gather complete: {} gathered, {} skipped",
@@ -239,6 +253,16 @@ impl Orchestrator {
     /// Gather from a single child
     fn gather_from_child(&self, parent: &Session, child_name: &str, dry_run: bool) -> Result<bool> {
         let child = self.session_mgr.load_session(child_name)?;
+
+        // Retain closed children in session history without treating their
+        // removed worktrees as active merge destinations or sources.
+        if matches!(
+            child.status,
+            SessionStatus::Archived | SessionStatus::Integrated | SessionStatus::Abandoned
+        ) {
+            println!("  {} {} (closed)", "↷".dimmed(), child_name);
+            return Ok(false);
+        }
 
         println!("  {} {}", "←".cyan(), child_name);
 

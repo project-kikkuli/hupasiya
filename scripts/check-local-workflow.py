@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 
 
 def main():
@@ -100,7 +101,45 @@ def main():
         (child_path / "child.txt").write_text("child contribution\n")
         git("add", "child.txt", cwd=child_path)
         git("commit", "-m", "Child contribution", cwd=child_path)
-        run([hp, "gather", "parent"], nested)
+        # Pause only the real Git merge so another hp command can update the
+        # parent after gather has read its metadata. The shim then delegates to
+        # the real Git executable; no merge result is mocked.
+        shim_dir = root / "merge-gate"
+        shim_dir.mkdir()
+        entered, release = shim_dir / "entered", shim_dir / "release"
+        shim = shim_dir / "git"
+        shim.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = merge ]; then\n'
+            f"  touch {shlex.quote(str(entered))}\n"
+            "  attempts=0\n"
+            f"  while [ ! -f {shlex.quote(str(release))} ]; do\n"
+            '    attempts=$((attempts + 1)); [ "$attempts" -lt 1500 ] || exit 91\n'
+            "    sleep 0.01\n  done\nfi\n"
+            'exec /usr/bin/git "$@"\n'
+        )
+        shim.chmod(0o755)
+        gather = subprocess.Popen([str(hp), "gather", "parent"], cwd=nested,
+                                  env={**env, "PATH": f"{shim_dir}:{env['PATH']}"},
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 15
+            while not entered.exists():
+                assert gather.poll() is None, gather.communicate()
+                assert time.monotonic() < deadline, "gather did not reach the merge gate"
+                time.sleep(0.01)
+            run([hp, "new", "late-child", "--parent", "parent"], nested)
+            release.touch()
+            output, error = gather.communicate(timeout=30)
+            assert gather.returncode == 0, output + error
+        finally:
+            release.touch()
+            if gather.poll() is None:
+                gather.kill()
+                gather.communicate()
+        assert "late-child" in sessions()["parent"]["children"], "gather overwrote a concurrent child link"
+        print("PASS: gather retains a child linked while its real Git merge is running")
+        run([hp, "close", "late-child", "--remove-workbox", "--archive"])
         assert (parent_path / "child.txt").read_text() == "child contribution\n"
         (parent_path / "later.txt").write_text("later contribution\n")
         git("add", "later.txt", cwd=parent_path)

@@ -164,27 +164,24 @@ impl UtilitiesManager {
 
     /// Leave a session (graceful cleanup)
     pub fn leave(&self, session_name: &str, archive: bool) -> Result<()> {
-        let mut session = self.session_mgr.load_session(session_name)?;
-
         println!("{} Leaving session '{}'", "→".cyan(), session_name);
-
-        if archive {
-            session.status = SessionStatus::Archived;
+        self.session_mgr.mutate_session(session_name, |session| {
+            session.status = if archive {
+                SessionStatus::Archived
+            } else {
+                SessionStatus::Paused
+            };
             session.log_activity(
                 crate::models::ActivityType::StatusChanged,
-                "Archived".to_string(),
+                if archive { "Archived" } else { "Paused" }.to_string(),
             );
-            self.session_mgr.save_session(&session)?;
-            println!("  {} Session archived", "✓".green());
-        } else {
-            session.status = SessionStatus::Paused;
-            session.log_activity(
-                crate::models::ActivityType::StatusChanged,
-                "Paused".to_string(),
-            );
-            self.session_mgr.save_session(&session)?;
-            println!("  {} Session paused", "✓".green());
-        }
+            Ok(())
+        })?;
+        println!(
+            "  {} Session {}",
+            "✓".green(),
+            if archive { "archived" } else { "paused" }
+        );
 
         println!();
         println!("Session '{}' can be resumed later with:", session_name);
