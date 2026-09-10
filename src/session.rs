@@ -150,7 +150,7 @@ impl SessionManager {
         }
 
         // Sort by last active (most recent first)
-        sessions.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+        sessions.sort_by_key(|session| std::cmp::Reverse(session.last_active));
 
         Ok(sessions)
     }
