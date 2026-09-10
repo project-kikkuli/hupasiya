@@ -141,7 +141,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Build JSON-capable companion
-        run: cargo install --git https://github.com/project-kikkuli/hannahanna --rev bca9bd5277641d6e43d3d24e136bca6aca52e2e8 --locked hannahanna
+        run: cargo install --git https://github.com/project-kikkuli/hannahanna --rev 15f398104638af60ad318a32d4ce021d6284219a --locked hannahanna
       - name: Build hp
         run: cargo build --locked
       - name: Exercise disposable local sessions

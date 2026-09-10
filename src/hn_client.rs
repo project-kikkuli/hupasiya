@@ -207,7 +207,7 @@ impl HnClient {
     /// Remove a workbox
     pub fn remove_workbox(&self, name: &str, force: bool) -> Result<()> {
         let mut cmd = self.command();
-        cmd.arg("remove").arg(name);
+        cmd.arg("remove").arg(name).arg("--exact");
 
         if force {
             cmd.arg("--force");

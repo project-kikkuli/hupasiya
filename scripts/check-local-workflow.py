@@ -164,8 +164,17 @@ def main():
             "assert str(context) in command; print('default-launch-ok')"
         )
         assert "default-launch-ok" in run([hp, "launch", "plain", "--tool", sys.executable, "--", "-c", default_probe], default_repo)
-        run([hp, "close", "plain", "--remove-workbox", "--archive"], default_repo)
-        print("PASS: zero-config session and default slash-command context handoff")
+        run([hp, "new", "plain-other"], default_repo)
+        other_path = Path(sessions(default_repo)["plain-other"]["workbox_path"])
+        git("worktree", "remove", plain["workbox_path"], cwd=default_repo)
+        close = subprocess.run([str(hp), "close", "plain", "--remove-workbox", "--archive"],
+                               cwd=default_repo, env=env, capture_output=True, text=True, timeout=30)
+        assert other_path.exists(), "closing a missing worktree removed a fuzzy match"
+        assert close.returncode != 0, close.stdout + close.stderr
+        assert sessions(default_repo)["plain"]["status"] == "active"
+        run([hp, "close", "plain", "--archive"], default_repo)
+        run([hp, "close", "plain-other", "--remove-workbox", "--archive"], default_repo)
+        print("PASS: zero-config context handoff and exact removal of session worktrees")
 
 
 

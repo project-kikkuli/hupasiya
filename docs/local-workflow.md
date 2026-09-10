@@ -9,7 +9,7 @@ worktrees. It requires a JSON-capable hannahanna build; the published 0.6.0 CLI
 does not implement the protocol hp needs. Until a compatible release exists:
 
 ```sh
-cargo install --git https://github.com/project-kikkuli/hannahanna --rev bca9bd5277641d6e43d3d24e136bca6aca52e2e8 --locked hannahanna
+cargo install --git https://github.com/project-kikkuli/hannahanna --rev 15f398104638af60ad318a32d4ce021d6284219a --locked hannahanna
 cargo install --path . --locked
 ```
 
@@ -45,7 +45,9 @@ previously created elsewhere are not automatically migrated.
 A child inherits its parent's branch unless `--from` overrides it. Gather/cascade
 return failure when any merge fails; inspect and resolve or abort the Git merge
 in the affected worktree before retrying. Closing with `--remove-workbox` refuses
-dirty work instead of forcing deletion. Archive retains metadata and context.
+dirty work instead of forcing deletion. Removal requires an exact worktree name,
+so a missing worktree cannot redirect deletion to a similarly named one. Archive
+retains metadata and context.
 Neither operation publishes or merges a GitHub PR.
 
 ## Verification
