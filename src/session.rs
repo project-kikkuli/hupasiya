@@ -4,7 +4,8 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::hn_client::{HnClient, WorkboxOptions};
 use crate::models::{ActivityType, AgentType, Session, SessionStatus};
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Session manager
@@ -19,7 +20,7 @@ pub struct SessionManager {
 impl SessionManager {
     /// Create a new session manager
     pub fn new(config: Config) -> Result<Self> {
-        let hn_client = HnClient::new()?;
+        let hn_client = HnClient::from_config(&config)?;
         let sessions_dir = config.hp.sessions.metadata_dir.clone();
 
         // Ensure sessions directory exists
@@ -77,6 +78,14 @@ impl SessionManager {
             workbox_info.vcs_type,
         );
 
+        session.context_dir = self
+            .config
+            .hp
+            .sessions
+            .context_dir
+            .join(&session.repo_name)
+            .join(name);
+
         // Log activity
         session.log_activity(
             ActivityType::SessionCreated,
@@ -91,6 +100,11 @@ impl SessionManager {
 
     /// Load a session by name
     pub fn load_session(&self, name: &str) -> Result<Session> {
+        let _lock = self.lock_store()?;
+        self.load_session_unlocked(name)
+    }
+
+    fn load_session_unlocked(&self, name: &str) -> Result<Session> {
         let session_path = self.get_session_path(name);
 
         if !session_path.exists() {
@@ -100,25 +114,56 @@ impl SessionManager {
         let content = fs::read_to_string(&session_path)
             .map_err(|e| Error::FileSystemError(format!("Failed to read session file: {}", e)))?;
 
-        let session: Session = serde_yaml::from_str(&content)?;
+        let mut session: Session = serde_yaml::from_str(&content)?;
+        if session.context_dir.is_relative() && !self.config.repository_root.as_os_str().is_empty()
+        {
+            session.context_dir = self.config.repository_root.join(&session.context_dir);
+        }
 
         Ok(session)
     }
 
-    /// Save a session
+    /// Replace a complete session record. For concurrent read-modify-write
+    /// operations, use mutate_session so the update starts from current state.
     pub fn save_session(&self, session: &Session) -> Result<()> {
+        let _lock = self.lock_store()?;
+        self.save_session_unlocked(session)
+    }
+
+    fn save_session_unlocked(&self, session: &Session) -> Result<()> {
         let session_path = self.get_session_path(&session.name);
-
         let content = serde_yaml::to_string(session)?;
-
-        fs::write(&session_path, content)
-            .map_err(|e| Error::FileSystemError(format!("Failed to write session file: {}", e)))?;
-
+        let mut temporary = tempfile::NamedTempFile::new_in(&self.sessions_dir)?;
+        if let Ok(metadata) = fs::metadata(&session_path) {
+            temporary
+                .as_file()
+                .set_permissions(metadata.permissions())?;
+        }
+        temporary.write_all(content.as_bytes())?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(&session_path).map_err(|error| {
+            Error::FileSystemError(format!("Failed to replace session file: {}", error.error))
+        })?;
         Ok(())
+    }
+
+    /// Apply a metadata change while excluding other hp processes' updates.
+    /// The closure must not call another SessionManager method.
+    pub fn mutate_session(
+        &self,
+        name: &str,
+        update: impl FnOnce(&mut Session) -> Result<()>,
+    ) -> Result<Session> {
+        let _lock = self.lock_store()?;
+        let mut session = self.load_session_unlocked(name)?;
+        update(&mut session)?;
+        self.save_session_unlocked(&session)?;
+        Ok(session)
     }
 
     /// List all sessions
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
+        let _lock = self.lock_store()?;
         let mut sessions = Vec::new();
 
         let entries = fs::read_dir(&self.sessions_dir).map_err(|e| {
@@ -138,7 +183,7 @@ impl SessionManager {
         }
 
         // Sort by last active (most recent first)
-        sessions.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+        sessions.sort_by_key(|session| std::cmp::Reverse(session.last_active));
 
         Ok(sessions)
     }
@@ -168,6 +213,7 @@ impl SessionManager {
 
     /// Delete a session
     pub fn delete_session(&self, name: &str) -> Result<()> {
+        let _lock = self.lock_store()?;
         let session_path = self.get_session_path(name);
 
         if !session_path.exists() {
@@ -187,11 +233,12 @@ impl SessionManager {
 
     /// Link a child session to a parent
     pub fn link_parent_child(&self, parent_name: &str, child_name: &str) -> Result<()> {
+        let _lock = self.lock_store()?;
         // Load parent
-        let mut parent = self.load_session(parent_name)?;
+        let mut parent = self.load_session_unlocked(parent_name)?;
 
         // Load child
-        let mut child = self.load_session(child_name)?;
+        let mut child = self.load_session_unlocked(child_name)?;
 
         // Update relationships
         parent.add_child(child_name.to_string());
@@ -208,28 +255,29 @@ impl SessionManager {
         );
 
         // Save both
-        self.save_session(&parent)?;
-        self.save_session(&child)?;
+        self.save_session_unlocked(&parent)?;
+        self.save_session_unlocked(&child)?;
 
         Ok(())
     }
 
     /// Unlink a child session from its parent
     pub fn unlink_parent_child(&self, child_name: &str) -> Result<()> {
+        let _lock = self.lock_store()?;
         // Load child
-        let mut child = self.load_session(child_name)?;
+        let mut child = self.load_session_unlocked(child_name)?;
 
         if let Some(parent_name) = child.parent.clone() {
             // Load parent
-            let mut parent = self.load_session(&parent_name)?;
+            let mut parent = self.load_session_unlocked(&parent_name)?;
 
             // Remove relationship
             parent.remove_child(child_name);
             child.parent = None;
 
             // Save both
-            self.save_session(&parent)?;
-            self.save_session(&child)?;
+            self.save_session_unlocked(&parent)?;
+            self.save_session_unlocked(&child)?;
         }
 
         Ok(())
@@ -283,22 +331,22 @@ impl SessionManager {
         status: SessionStatus,
         remove_workbox: bool,
     ) -> Result<()> {
-        let mut session = self.load_session(name)?;
+        let session = self.load_session(name)?;
 
         // Remove workbox if requested
         if remove_workbox {
-            self.hn_client.remove_workbox(&session.workbox_name, true)?;
+            self.hn_client
+                .remove_workbox(&session.workbox_name, false)?;
         }
 
-        // Update status
-        session.status = status.clone();
-        session.log_activity(
-            ActivityType::StatusChanged,
-            format!("Session closed with status: {:?}", status),
-        );
-
-        // Save session
-        self.save_session(&session)?;
+        self.mutate_session(name, |current| {
+            current.status = status.clone();
+            current.log_activity(
+                ActivityType::StatusChanged,
+                format!("Session closed with status: {:?}", status),
+            );
+            Ok(())
+        })?;
 
         Ok(())
     }
@@ -340,10 +388,13 @@ impl SessionManager {
         new_session.created = chrono::Utc::now();
         new_session.last_active = chrono::Utc::now();
         new_session.activity_log.clear();
-        new_session.context_dir = PathBuf::from(format!(
-            ".hp/contexts/{}/{}",
-            new_session.repo_name, new_name
-        ));
+        new_session.context_dir = self
+            .config
+            .hp
+            .sessions
+            .context_dir
+            .join(&new_session.repo_name)
+            .join(new_name);
 
         // Override agent type if specified
         if let Some(agent_type) = new_agent_type {
@@ -363,6 +414,19 @@ impl SessionManager {
     }
 
     // === Private helpers ===
+
+    fn lock_store(&self) -> Result<File> {
+        // Keep the lock file: unlinking it could give concurrent processes
+        // different lock inodes. Closing the handle releases the OS lock.
+        let lock = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.sessions_dir.join(".sessions.lock"))?;
+        fs2::FileExt::lock_exclusive(&lock)?;
+        Ok(lock)
+    }
 
     fn get_session_path(&self, name: &str) -> PathBuf {
         self.sessions_dir.join(format!("{}.yaml", name))
@@ -387,6 +451,9 @@ impl SessionManager {
     }
 
     fn get_repo_name(&self) -> Result<String> {
+        if let Some(name) = self.config.repository_root.file_name() {
+            return Ok(name.to_string_lossy().into_owned());
+        }
         // Try to get from git
         let output = std::process::Command::new("git")
             .arg("rev-parse")

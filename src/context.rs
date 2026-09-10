@@ -160,7 +160,7 @@ impl ContextManager {
         }
 
         // Sort by timestamp (newest first)
-        snapshots.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        snapshots.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.timestamp));
 
         Ok(snapshots)
     }

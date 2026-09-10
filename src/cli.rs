@@ -34,9 +34,18 @@ pub fn cmd_new(
     let agent_type =
         AgentType::from_str(agent_type).map_err(crate::error::Error::InvalidAgentType)?;
 
-    // Create workbox options
+    // Validate the parent before creating a worktree, and inherit its branch
+    // unless an explicit starting branch was requested.
+    let parent_session = parent
+        .as_deref()
+        .map(|name| session_mgr.load_session(name))
+        .transpose()?;
     let opts = WorkboxOptions {
-        from: from_branch,
+        from: from_branch.or_else(|| {
+            parent_session
+                .as_ref()
+                .map(|session| session.branch.clone())
+        }),
         no_branch,
         ..Default::default()
     };
@@ -84,18 +93,18 @@ pub fn cmd_list(all: bool, tree: bool, format: Option<String>) -> Result<()> {
         session_mgr.list_sessions_by_status(SessionStatus::Active)?
     };
 
-    if sessions.is_empty() {
-        println!("{}", "No sessions found.".yellow());
-        println!("Create one with: hp new <session-name>");
-        return Ok(());
-    }
-
     if let Some(fmt) = format {
         if fmt == "json" {
             let json = serde_json::to_string_pretty(&sessions)?;
             println!("{}", json);
             return Ok(());
         }
+    }
+
+    if sessions.is_empty() {
+        println!("{}", "No sessions found.".yellow());
+        println!("Create one with: hp new <session-name>");
+        return Ok(());
     }
 
     if tree {
@@ -111,7 +120,7 @@ pub fn cmd_list(all: bool, tree: bool, format: Option<String>) -> Result<()> {
 pub fn cmd_info(name: &str, verbose: bool) -> Result<()> {
     let config = Config::load()?;
     let session_mgr = SessionManager::new(config.clone())?;
-    let hn_client = HnClient::new()?;
+    let hn_client = HnClient::from_config(&config)?;
 
     let session = session_mgr.load_session(name)?;
 
@@ -225,14 +234,20 @@ pub fn cmd_switch(name: &str, output_shell: bool) -> Result<()> {
 
     if output_shell {
         // Output shell commands for wrapper to execute
-        println!("cd {}", session.workbox_path.display());
-        println!("export HP_SESSION={}", session.name);
+        println!(
+            "cd {}",
+            shell_quote(&session.workbox_path.to_string_lossy())
+        );
+        println!("export HP_SESSION={}", shell_quote(&session.name));
         println!(
             "export HP_CONTEXT={}",
-            session.context_dir.join("context.md").display()
+            shell_quote(&session.context_dir.join("context.md").to_string_lossy())
         );
-        println!("export HP_WORKBOX={}", session.workbox_path.display());
-        println!("export HP_VCS={}", session.vcs_type);
+        println!(
+            "export HP_WORKBOX={}",
+            shell_quote(&session.workbox_path.to_string_lossy())
+        );
+        println!("export HP_VCS={}", shell_quote(&session.vcs_type));
     } else {
         println!(
             "{}",
@@ -256,6 +271,10 @@ pub fn cmd_switch(name: &str, output_shell: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Execute the 'context view' command

@@ -4,7 +4,7 @@ use crate::config::Config;
 use crate::context::ContextManager;
 use crate::error::{Error, Result};
 use crate::hn_client::HnClient;
-use crate::models::{ActivityType, Session, SnapshotTrigger};
+use crate::models::{ActivityType, Session, SessionStatus, SnapshotTrigger};
 use crate::session::SessionManager;
 use colored::Colorize;
 
@@ -21,7 +21,7 @@ impl Orchestrator {
     pub fn new(config: Config) -> Result<Self> {
         let session_mgr = SessionManager::new(config.clone())?;
         let context_mgr = ContextManager::new(config.clone())?;
-        let hn_client = HnClient::new()?;
+        let hn_client = HnClient::from_config(&config)?;
 
         Ok(Self {
             config,
@@ -50,6 +50,7 @@ impl Orchestrator {
 
         let mut cascaded = 0;
         let mut skipped = 0;
+        let mut failed = 0;
 
         for child_name in &parent.children {
             match self.cascade_to_child(&parent, child_name, dry_run) {
@@ -62,11 +63,17 @@ impl Orchestrator {
                         child_name,
                         e
                     );
-                    skipped += 1;
+                    failed += 1;
                 }
             }
         }
 
+        if failed > 0 {
+            return Err(Error::Other(format!(
+                "Cascade failed for {} child session(s); {} completed, {} skipped",
+                failed, cascaded, skipped
+            )));
+        }
         println!();
         if dry_run {
             println!("{} Dry run complete", "ℹ".blue());
@@ -85,7 +92,17 @@ impl Orchestrator {
     /// Cascade to a single child
     fn cascade_to_child(&self, parent: &Session, child_name: &str, dry_run: bool) -> Result<bool> {
         // Load child session
-        let mut child = self.session_mgr.load_session(child_name)?;
+        let child = self.session_mgr.load_session(child_name)?;
+
+        // Retain closed children in session history without treating their
+        // removed worktrees as active merge destinations or sources.
+        if matches!(
+            child.status,
+            SessionStatus::Archived | SessionStatus::Integrated | SessionStatus::Abandoned
+        ) {
+            println!("  {} {} (closed)", "↷".dimmed(), child_name);
+            return Ok(false);
+        }
 
         println!("  {} {}", "→".cyan(), child_name);
 
@@ -95,8 +112,8 @@ impl Orchestrator {
         // Determine merge command based on VCS
         let merge_cmd = match child_wb.vcs_type.as_str() {
             "git" => format!("git merge {}", parent.branch),
-            "hg" => format!("hg merge {}", parent.branch),
-            "jj" => format!("jj rebase -d {}", parent.branch),
+            "hg" | "mercurial" => format!("hg merge {}", parent.branch),
+            "jj" | "jujutsu" => format!("jj rebase -d {}", parent.branch),
             _ => {
                 return Err(Error::Other(format!(
                     "Unknown VCS type: {}",
@@ -145,18 +162,20 @@ impl Orchestrator {
         }
 
         // Update child activity log
-        child.log_activity(
-            ActivityType::Cascaded,
-            format!("Cascaded changes from parent '{}'", parent.name),
-        );
-        self.session_mgr.save_session(&child)?;
+        self.session_mgr.mutate_session(&child.name, |current| {
+            current.log_activity(
+                ActivityType::Cascaded,
+                format!("Cascaded changes from parent '{}'", parent.name),
+            );
+            Ok(())
+        })?;
 
         Ok(true)
     }
 
     /// Gather: Collect all children back to parent
     pub fn gather(&self, parent_name: &str, dry_run: bool) -> Result<()> {
-        let mut parent = self.session_mgr.load_session(parent_name)?;
+        let parent = self.session_mgr.load_session(parent_name)?;
 
         if parent.children.is_empty() {
             println!("{}", "No child sessions to gather from.".yellow());
@@ -183,6 +202,7 @@ impl Orchestrator {
 
         let mut gathered = 0;
         let mut skipped = 0;
+        let mut failed = 0;
 
         for child_name in parent.children.clone() {
             match self.gather_from_child(&parent, &child_name, dry_run) {
@@ -195,21 +215,29 @@ impl Orchestrator {
                         child_name,
                         e
                     );
-                    skipped += 1;
+                    failed += 1;
                 }
             }
         }
 
+        if failed > 0 {
+            return Err(Error::Other(format!(
+                "Gather failed for {} child session(s); {} completed, {} skipped",
+                failed, gathered, skipped
+            )));
+        }
         println!();
         if dry_run {
             println!("{} Dry run complete", "ℹ".blue());
         } else {
             // Update parent activity
-            parent.log_activity(
-                ActivityType::Gathered,
-                format!("Gathered {} children", gathered),
-            );
-            self.session_mgr.save_session(&parent)?;
+            self.session_mgr.mutate_session(&parent.name, |current| {
+                current.log_activity(
+                    ActivityType::Gathered,
+                    format!("Gathered {} children", gathered),
+                );
+                Ok(())
+            })?;
 
             println!(
                 "{} Gather complete: {} gathered, {} skipped",
@@ -226,6 +254,16 @@ impl Orchestrator {
     fn gather_from_child(&self, parent: &Session, child_name: &str, dry_run: bool) -> Result<bool> {
         let child = self.session_mgr.load_session(child_name)?;
 
+        // Retain closed children in session history without treating their
+        // removed worktrees as active merge destinations or sources.
+        if matches!(
+            child.status,
+            SessionStatus::Archived | SessionStatus::Integrated | SessionStatus::Abandoned
+        ) {
+            println!("  {} {} (closed)", "↷".dimmed(), child_name);
+            return Ok(false);
+        }
+
         println!("  {} {}", "←".cyan(), child_name);
 
         // Get parent workbox info
@@ -234,8 +272,8 @@ impl Orchestrator {
         // Determine merge command based on VCS
         let merge_cmd = match parent_wb.vcs_type.as_str() {
             "git" => format!("git merge {}", child.branch),
-            "hg" => format!("hg merge {}", child.branch),
-            "jj" => format!("jj rebase -s {} -d {}", child.branch, parent.branch),
+            "hg" | "mercurial" => format!("hg merge {}", child.branch),
+            "jj" | "jujutsu" => format!("jj rebase -s {} -d {}", child.branch, parent.branch),
             _ => {
                 return Err(Error::Other(format!(
                     "Unknown VCS type: {}",

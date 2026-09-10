@@ -253,6 +253,7 @@ pub struct WorkboxInfo {
     /// Current branch
     pub branch: String,
     /// Base branch
+    #[serde(default)]
     pub base_branch: String,
     /// VCS type
     pub vcs_type: String,

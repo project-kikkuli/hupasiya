@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main, develop, 'claude/**' ]
   pull_request:
-    branches: [ main, develop ]
+    branches: [ main, develop, ai/complete-local-workflow ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -133,3 +133,16 @@ jobs:
         with:
           name: hupasiya-binary
           path: target/release/hp
+
+  local-workflow:
+    name: Real Git session workflow
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build JSON-capable companion
+        run: cargo install --git https://github.com/project-kikkuli/hannahanna --rev 15f398104638af60ad318a32d4ce021d6284219a --locked hannahanna
+      - name: Build hp
+        run: cargo build --locked
+      - name: Exercise disposable local sessions
+        run: python3 scripts/check-local-workflow.py --hp target/debug/hp --hn "$(command -v hn)"

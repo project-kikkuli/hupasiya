@@ -42,6 +42,8 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 which = "6.0"
 dirs = "5.0"
+fs2 = "0.4"
+tempfile = "3.8"
 
 # GitHub API (for PR integration)
 octocrab = "0.32"
@@ -50,7 +52,6 @@ octocrab = "0.32"
 reqwest = { version = "0.11", features = ["json", "blocking"] }
 
 [dev-dependencies]
-tempfile = "3.8"
 assert_cmd = "2.0"
 predicates = "3.0"
 

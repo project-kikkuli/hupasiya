@@ -23,6 +23,9 @@ hupasiya (`hp`) is a multi-agent session orchestrator built on top of [hannahann
 
 hupasiya calls `hn` commands as an external tool. Both must be installed.
 
+For the verified local Git workflow and the required JSON-capable companion build,
+see [local workflow setup](docs/local-workflow.md).
+
 ## Status
 
 **Version**: 1.0.0
