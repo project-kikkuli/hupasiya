@@ -68,3 +68,6 @@ CI pins the same companion revision and runs this check on Linux.
 This establishes the local Git workflow only. Mercurial/Jujutsu, tmux/screen,
 GitHub PR automation, remote handoff, and the marketplace were not exercised by
 this check. It is not a live multi-agent or model-quality evaluation.
+
+For overlapping commands and closed-child behavior, see
+[concurrent session updates](session-storage.md).
