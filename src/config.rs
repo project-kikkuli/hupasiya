@@ -11,12 +11,15 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     pub hp: HpConfig,
+    #[serde(skip)]
+    pub repository_root: PathBuf,
 }
 
 impl Config {
     /// Load configuration with 4-level hierarchy
     pub fn load() -> Result<Self> {
         let mut config = Self::default();
+        let root = repository_root()?;
 
         // 1. System config
         if let Ok(system_config) = Self::load_from("/etc/hapusiyas/config.yml") {
@@ -32,15 +35,32 @@ impl Config {
         }
 
         // 3. Repo config
-        if let Ok(repo_config) = Self::load_from(".hapusiyas.yml") {
+        if let Ok(repo_config) = Self::load_from(root.join(".hapusiyas.yml")) {
             config = Self::merge(config, repo_config);
         }
 
         // 4. Local config (gitignored)
-        if let Ok(local_config) = Self::load_from(".hapusiyas.local.yml") {
+        if let Ok(local_config) = Self::load_from(root.join(".hapusiyas.local.yml")) {
             config = Self::merge(config, local_config);
         }
 
+        for path in [
+            &mut config.hp.sessions.metadata_dir,
+            &mut config.hp.sessions.context_dir,
+        ] {
+            if path.is_relative() {
+                *path = root.join(&*path);
+            }
+        }
+        if config.hp.hn.command.contains(std::path::MAIN_SEPARATOR)
+            && Path::new(&config.hp.hn.command).is_relative()
+        {
+            config.hp.hn.command = root
+                .join(&config.hp.hn.command)
+                .to_string_lossy()
+                .into_owned();
+        }
+        config.repository_root = root;
         Ok(config)
     }
 
@@ -64,6 +84,32 @@ impl Config {
     pub fn get_active_profile(&self) -> Option<&ProfileConfig> {
         self.hp.profiles.get(&self.hp.active_profile)
     }
+}
+
+/// Git's first worktree is the primary checkout. Use its root for shared
+/// metadata/config so entering a linked worktree or subdirectory does not
+/// create a second, unrelated session store.
+fn repository_root() -> Result<PathBuf> {
+    let current = std::env::current_dir()?;
+    let output = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain", "-z"])
+        .current_dir(&current)
+        .output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            if let Some(first) = output.stdout.split(|byte| *byte == 0).next() {
+                if let Some(path) = String::from_utf8_lossy(first).strip_prefix("worktree ") {
+                    return Ok(PathBuf::from(path));
+                }
+            }
+        }
+    }
+    for directory in current.ancestors() {
+        if directory.join(".hg").exists() || directory.join(".jj").exists() {
+            return Ok(directory.to_path_buf());
+        }
+    }
+    Ok(current)
 }
 
 /// hupasiya configuration

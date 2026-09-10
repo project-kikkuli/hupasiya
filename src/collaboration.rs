@@ -23,7 +23,7 @@ impl CollaborationManager {
     pub fn new(config: Config) -> Result<Self> {
         let session_mgr = SessionManager::new(config.clone())?;
         let context_mgr = ContextManager::new(config.clone())?;
-        let hn_client = HnClient::new()?;
+        let hn_client = HnClient::from_config(&config)?;
 
         Ok(Self {
             config,

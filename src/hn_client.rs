@@ -7,6 +7,7 @@ use std::process::Command;
 /// hannahanna CLI client
 pub struct HnClient {
     hn_command: String,
+    working_dir: Option<std::path::PathBuf>,
 }
 
 /// Options for creating a workbox
@@ -34,14 +35,39 @@ impl HnClient {
             .to_string_lossy()
             .to_string();
 
-        Ok(Self { hn_command })
+        Ok(Self {
+            hn_command,
+            working_dir: None,
+        })
     }
 
     /// Create a new hannahanna client with custom command path
     pub fn with_command(command: String) -> Self {
         Self {
             hn_command: command,
+            working_dir: None,
         }
+    }
+
+    /// Use the configured executable and the repository's shared workspace registry.
+    pub fn from_config(config: &crate::config::Config) -> Result<Self> {
+        let command = which::which(&config.hp.hn.command).map_err(|_| Error::HnNotFound)?;
+        Ok(Self {
+            hn_command: command.to_string_lossy().into_owned(),
+            working_dir: if config.repository_root.as_os_str().is_empty() {
+                None
+            } else {
+                Some(config.repository_root.clone())
+            },
+        })
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.hn_command);
+        if let Some(directory) = &self.working_dir {
+            command.current_dir(directory);
+        }
+        command
     }
 
     /// Check if hannahanna is installed
@@ -52,11 +78,25 @@ impl HnClient {
 
     /// Create a new workbox
     pub fn create_workbox(&self, name: &str, opts: &WorkboxOptions) -> Result<WorkboxInfo> {
-        let mut cmd = Command::new(&self.hn_command);
+        // Resolve the starting branch before mutation, and fail early if hn
+        // does not support the machine-readable protocol.
+        let current = self
+            .command()
+            .args(["info", "--format=json"])
+            .current_dir(std::env::current_dir()?)
+            .output()?;
+        if !current.status.success() {
+            return Err(Error::HnCommandFailed(format!(
+                "hn info --format=json failed; install a JSON-capable hannahanna build: {}",
+                String::from_utf8_lossy(&current.stderr)
+            )));
+        }
+        let current = self.parse_workbox_info(&String::from_utf8_lossy(&current.stdout))?;
+        let base_branch = opts.from.clone().unwrap_or(current.branch);
+        let mut cmd = self.command();
         cmd.arg("add").arg(name);
-
-        if let Some(ref from) = opts.from {
-            cmd.arg("--from").arg(from);
+        if !opts.no_branch {
+            cmd.arg("--from").arg(&base_branch);
         }
 
         if let Some(ref vcs) = opts.vcs {
@@ -90,12 +130,15 @@ impl HnClient {
 
         // Parse JSON output
         let stdout = String::from_utf8_lossy(&output.stdout);
-        self.parse_workbox_info(&stdout)
+        let mut info = self.parse_workbox_info(&stdout)?;
+        info.base_branch = base_branch;
+        Ok(info)
     }
 
     /// Get workbox information
     pub fn get_workbox_info(&self, name: &str) -> Result<WorkboxInfo> {
-        let output = Command::new(&self.hn_command)
+        let output = self
+            .command()
             .arg("info")
             .arg(name)
             .arg("--format=json")
@@ -107,12 +150,17 @@ impl HnClient {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        self.parse_workbox_info(&stdout)
+        let info = self.parse_workbox_info(&stdout)?;
+        if info.name != name {
+            return Err(Error::WorkboxNotFound(name.to_string()));
+        }
+        Ok(info)
     }
 
     /// List all workboxes
     pub fn list_workboxes(&self) -> Result<Vec<WorkboxInfo>> {
-        let output = Command::new(&self.hn_command)
+        let output = self
+            .command()
             .arg("list")
             .arg("--format=json")
             .output()
@@ -135,20 +183,20 @@ impl HnClient {
 
     /// Execute a command in a workbox
     pub fn exec_in_workbox(&self, name: &str, command: &str) -> Result<String> {
-        let output = Command::new(&self.hn_command)
-            .arg("exec")
-            .arg(name)
-            .arg("--")
-            .arg("sh")
+        let info = self.get_workbox_info(name)?;
+        let output = Command::new("sh")
             .arg("-c")
             .arg(command)
+            .current_dir(&info.path)
             .output()
             .map_err(|e| Error::HnCommandFailed(format!("Failed to execute command: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(Error::HnCommandFailed(format!(
-                "Command in workbox failed: {}",
+                "Command in workbox failed ({}): {}{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
                 stderr
             )));
         }
@@ -158,7 +206,7 @@ impl HnClient {
 
     /// Remove a workbox
     pub fn remove_workbox(&self, name: &str, force: bool) -> Result<()> {
-        let mut cmd = Command::new(&self.hn_command);
+        let mut cmd = self.command();
         cmd.arg("remove").arg(name);
 
         if force {

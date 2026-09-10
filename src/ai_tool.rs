@@ -9,7 +9,6 @@ use crate::hn_client::HnClient;
 use crate::session::SessionManager;
 use std::collections::HashMap;
 use std::env;
-use std::path::PathBuf;
 use std::process::Command;
 
 /// AI tool launcher
@@ -23,7 +22,7 @@ impl AiTool {
     /// Create new AI tool launcher
     pub fn new(config: Config) -> Result<Self> {
         let session_mgr = SessionManager::new(config.clone())?;
-        let hn_client = HnClient::new()?;
+        let hn_client = HnClient::from_config(&config)?;
 
         Ok(Self {
             config,
@@ -64,7 +63,11 @@ impl AiTool {
         env_vars.insert("HP_SESSION".to_string(), session_name.clone());
         env_vars.insert(
             "HP_CONTEXT".to_string(),
-            format!(".hp/contexts/{}", session_name),
+            session
+                .context_dir
+                .join("context.md")
+                .to_string_lossy()
+                .into_owned(),
         );
         env_vars.insert(
             "HP_WORKBOX".to_string(),
@@ -79,17 +82,27 @@ impl AiTool {
         match ai_config.context_strategy {
             ContextStrategy::SlashCommand => {
                 // For slash command strategy, create a global command file
-                self.create_slash_command(&session_name)?;
+                self.create_slash_command(&session)?;
                 println!("📝 Created slash command for context");
             }
             ContextStrategy::Flag => {
                 args.push("--context".to_string());
-                args.push(format!(".hp/contexts/{}/context.md", session_name));
+                args.push(
+                    session
+                        .context_dir
+                        .join("context.md")
+                        .to_string_lossy()
+                        .into_owned(),
+                );
             }
             ContextStrategy::Env => {
                 env_vars.insert(
                     "CONTEXT_FILE".to_string(),
-                    format!(".hp/contexts/{}/context.md", session_name),
+                    session
+                        .context_dir
+                        .join("context.md")
+                        .to_string_lossy()
+                        .into_owned(),
                 );
             }
             ContextStrategy::File => {
@@ -155,7 +168,11 @@ impl AiTool {
         env_vars.insert("HP_SESSION".to_string(), session_name.clone());
         env_vars.insert(
             "HP_CONTEXT".to_string(),
-            format!(".hp/contexts/{}", session_name),
+            session
+                .context_dir
+                .join("context.md")
+                .to_string_lossy()
+                .into_owned(),
         );
         env_vars.insert(
             "HP_WORKBOX".to_string(),
@@ -226,12 +243,16 @@ impl AiTool {
             .unwrap_or(self.config.hp.ai_tool.clone()))
     }
 
-    fn create_slash_command(&self, session_name: &str) -> Result<()> {
+    fn create_slash_command(&self, session: &crate::models::Session) -> Result<()> {
         // Create .claude/commands/hp_context.md for Claude Code
-        let commands_dir = PathBuf::from(".claude/commands");
+        let commands_dir = session.workbox_path.join(".claude/commands");
         std::fs::create_dir_all(&commands_dir)?;
 
-        let context_path = format!(".hp/contexts/{}/context.md", session_name);
+        let context_path = session
+            .context_dir
+            .join("context.md")
+            .to_string_lossy()
+            .into_owned();
         let slash_command = format!(
             "Read the hupasiya context file at {} and use it to guide your work on this session.",
             context_path
@@ -418,6 +439,19 @@ impl AiTool {
 
         let mut env_vars = HashMap::new();
         env_vars.insert("HP_SESSION".to_string(), session_name.to_string());
+        env_vars.insert(
+            "HP_CONTEXT".to_string(),
+            session
+                .context_dir
+                .join("context.md")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        env_vars.insert(
+            "HP_WORKBOX".to_string(),
+            workbox_info.path.to_string_lossy().into_owned(),
+        );
+        env_vars.insert("HP_VCS".to_string(), workbox_info.vcs_type.clone());
 
         let workbox_path = workbox_info.path.to_string_lossy().to_string();
         self.run_in_workbox(&workbox_path, command, &env_vars)?;
@@ -524,27 +558,34 @@ mod tests {
     }
 
     #[test]
-    fn test_create_slash_command_standalone() {
+    fn test_create_slash_command_in_session_worktree() {
         let temp_dir = TempDir::new().unwrap();
-        std::env::set_current_dir(temp_dir.path()).unwrap();
-
-        // Test the slash command creation logic without AiTool
-        let commands_dir = PathBuf::from(".claude/commands");
-        std::fs::create_dir_all(&commands_dir).unwrap();
-
-        let session_name = "test-session";
-        let context_path = format!(".hp/contexts/{}/context.md", session_name);
-        let slash_command = format!(
-            "Read the hupasiya context file at {} and use it to guide your work on this session.",
-            context_path
+        let mut config = Config::default();
+        config.hp.sessions.metadata_dir = temp_dir.path().join("sessions");
+        let hn_client = HnClient::with_command("unused-hn".into());
+        let session_mgr =
+            SessionManager::with_client(config.clone(), HnClient::with_command("unused-hn".into()))
+                .unwrap();
+        let ai_tool = AiTool {
+            config,
+            session_mgr,
+            hn_client,
+        };
+        let mut session = crate::models::Session::new(
+            "test-session".into(),
+            crate::models::AgentType::Feature,
+            "test-session".into(),
+            temp_dir.path().join("worktree"),
+            "test-session".into(),
+            "main".into(),
+            "repo".into(),
+            "git".into(),
         );
-
-        std::fs::write(commands_dir.join("hp_context.md"), slash_command).unwrap();
-
-        let command_file = temp_dir.path().join(".claude/commands/hp_context.md");
-        assert!(command_file.exists());
-
-        let content = std::fs::read_to_string(&command_file).unwrap();
-        assert!(content.contains(".hp/contexts/test-session/context.md"));
+        session.context_dir = temp_dir.path().join("shared/context");
+        ai_tool.create_slash_command(&session).unwrap();
+        let content =
+            std::fs::read_to_string(session.workbox_path.join(".claude/commands/hp_context.md"))
+                .unwrap();
+        assert!(content.contains(session.context_dir.join("context.md").to_str().unwrap()));
     }
 }

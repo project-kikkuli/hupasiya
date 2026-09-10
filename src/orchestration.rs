@@ -21,7 +21,7 @@ impl Orchestrator {
     pub fn new(config: Config) -> Result<Self> {
         let session_mgr = SessionManager::new(config.clone())?;
         let context_mgr = ContextManager::new(config.clone())?;
-        let hn_client = HnClient::new()?;
+        let hn_client = HnClient::from_config(&config)?;
 
         Ok(Self {
             config,
@@ -50,6 +50,7 @@ impl Orchestrator {
 
         let mut cascaded = 0;
         let mut skipped = 0;
+        let mut failed = 0;
 
         for child_name in &parent.children {
             match self.cascade_to_child(&parent, child_name, dry_run) {
@@ -62,11 +63,17 @@ impl Orchestrator {
                         child_name,
                         e
                     );
-                    skipped += 1;
+                    failed += 1;
                 }
             }
         }
 
+        if failed > 0 {
+            return Err(Error::Other(format!(
+                "Cascade failed for {} child session(s); {} completed, {} skipped",
+                failed, cascaded, skipped
+            )));
+        }
         println!();
         if dry_run {
             println!("{} Dry run complete", "ℹ".blue());
@@ -95,8 +102,8 @@ impl Orchestrator {
         // Determine merge command based on VCS
         let merge_cmd = match child_wb.vcs_type.as_str() {
             "git" => format!("git merge {}", parent.branch),
-            "hg" => format!("hg merge {}", parent.branch),
-            "jj" => format!("jj rebase -d {}", parent.branch),
+            "hg" | "mercurial" => format!("hg merge {}", parent.branch),
+            "jj" | "jujutsu" => format!("jj rebase -d {}", parent.branch),
             _ => {
                 return Err(Error::Other(format!(
                     "Unknown VCS type: {}",
@@ -183,6 +190,7 @@ impl Orchestrator {
 
         let mut gathered = 0;
         let mut skipped = 0;
+        let mut failed = 0;
 
         for child_name in parent.children.clone() {
             match self.gather_from_child(&parent, &child_name, dry_run) {
@@ -195,11 +203,17 @@ impl Orchestrator {
                         child_name,
                         e
                     );
-                    skipped += 1;
+                    failed += 1;
                 }
             }
         }
 
+        if failed > 0 {
+            return Err(Error::Other(format!(
+                "Gather failed for {} child session(s); {} completed, {} skipped",
+                failed, gathered, skipped
+            )));
+        }
         println!();
         if dry_run {
             println!("{} Dry run complete", "ℹ".blue());
@@ -234,8 +248,8 @@ impl Orchestrator {
         // Determine merge command based on VCS
         let merge_cmd = match parent_wb.vcs_type.as_str() {
             "git" => format!("git merge {}", child.branch),
-            "hg" => format!("hg merge {}", child.branch),
-            "jj" => format!("jj rebase -s {} -d {}", child.branch, parent.branch),
+            "hg" | "mercurial" => format!("hg merge {}", child.branch),
+            "jj" | "jujutsu" => format!("jj rebase -s {} -d {}", child.branch, parent.branch),
             _ => {
                 return Err(Error::Other(format!(
                     "Unknown VCS type: {}",

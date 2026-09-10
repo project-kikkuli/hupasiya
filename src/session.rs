@@ -19,7 +19,7 @@ pub struct SessionManager {
 impl SessionManager {
     /// Create a new session manager
     pub fn new(config: Config) -> Result<Self> {
-        let hn_client = HnClient::new()?;
+        let hn_client = HnClient::from_config(&config)?;
         let sessions_dir = config.hp.sessions.metadata_dir.clone();
 
         // Ensure sessions directory exists
@@ -77,6 +77,14 @@ impl SessionManager {
             workbox_info.vcs_type,
         );
 
+        session.context_dir = self
+            .config
+            .hp
+            .sessions
+            .context_dir
+            .join(&session.repo_name)
+            .join(name);
+
         // Log activity
         session.log_activity(
             ActivityType::SessionCreated,
@@ -100,7 +108,11 @@ impl SessionManager {
         let content = fs::read_to_string(&session_path)
             .map_err(|e| Error::FileSystemError(format!("Failed to read session file: {}", e)))?;
 
-        let session: Session = serde_yaml::from_str(&content)?;
+        let mut session: Session = serde_yaml::from_str(&content)?;
+        if session.context_dir.is_relative() && !self.config.repository_root.as_os_str().is_empty()
+        {
+            session.context_dir = self.config.repository_root.join(&session.context_dir);
+        }
 
         Ok(session)
     }
@@ -287,7 +299,8 @@ impl SessionManager {
 
         // Remove workbox if requested
         if remove_workbox {
-            self.hn_client.remove_workbox(&session.workbox_name, true)?;
+            self.hn_client
+                .remove_workbox(&session.workbox_name, false)?;
         }
 
         // Update status
@@ -340,10 +353,13 @@ impl SessionManager {
         new_session.created = chrono::Utc::now();
         new_session.last_active = chrono::Utc::now();
         new_session.activity_log.clear();
-        new_session.context_dir = PathBuf::from(format!(
-            ".hp/contexts/{}/{}",
-            new_session.repo_name, new_name
-        ));
+        new_session.context_dir = self
+            .config
+            .hp
+            .sessions
+            .context_dir
+            .join(&new_session.repo_name)
+            .join(new_name);
 
         // Override agent type if specified
         if let Some(agent_type) = new_agent_type {
@@ -387,6 +403,9 @@ impl SessionManager {
     }
 
     fn get_repo_name(&self) -> Result<String> {
+        if let Some(name) = self.config.repository_root.file_name() {
+            return Ok(name.to_string_lossy().into_owned());
+        }
         // Try to get from git
         let output = std::process::Command::new("git")
             .arg("rev-parse")
